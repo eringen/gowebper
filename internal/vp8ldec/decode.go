@@ -48,10 +48,10 @@ func decode(data []byte) (image.Image, error) {
 
 // bitReader reads bits LSB-first from a byte slice.
 type bitReader struct {
-	data []byte
-	pos  int    // byte position
-	bits uint64 // bit buffer
-	nBits int   // valid bits in buffer
+	data  []byte
+	pos   int    // byte position
+	bits  uint64 // bit buffer
+	nBits int    // valid bits in buffer
 }
 
 func newBitReader(data []byte) *bitReader {
@@ -336,62 +336,30 @@ func decodeVP8L(data []byte) (image.Image, error) {
 			tilesW := (width + (1<<tr.tileBits) - 1) >> tr.tileBits
 			tilesH := (height + (1<<tr.tileBits) - 1) >> tr.tileBits
 			var err error
-			tr.data, err = decodeLiteralImage(br, tilesW, tilesH, 0)
+			tr.data, err = decodeLiteralImage(br, tilesW, tilesH)
 			if err != nil {
 				return nil, fmt.Errorf("vp8ldec: transform %d data: %w", kind, err)
 			}
 		case transformPalette:
 			palSize := int(br.readBits(8)) + 1
+			// Palette is stored as a VP8L sub-image (delta-encoded).
+			deltaPal, err := decodeLiteralImage(br, palSize, 1)
+			if err != nil {
+				return nil, fmt.Errorf("vp8ldec: palette data: %w", err)
+			}
 			palette := make([]uint32, palSize)
-			// First entry read directly.
-			palette[0] = uint32(br.readBits(8)) | uint32(br.readBits(8))<<8 |
-				uint32(br.readBits(8))<<16 | uint32(br.readBits(8))<<24
-			// Subsequent entries are delta-coded.
+			palette[0] = deltaPal[0]
 			for i := 1; i < palSize; i++ {
-				da := uint8(br.readBits(8))
-				dr := uint8(br.readBits(8))
-				dg := uint8(br.readBits(8))
-				db := uint8(br.readBits(8))
-				prev := palette[i-1]
-				a := uint8(prev>>24) + da
-				r := uint8(prev>>16) + dr
-				g := uint8(prev>>8) + dg
-				bv := uint8(prev) + db
-				palette[i] = uint32(a)<<24 | uint32(r)<<16 | uint32(g)<<8 | uint32(bv)
+				palette[i] = addARGB(palette[i-1], deltaPal[i])
 			}
 			tr.palette = palette
 		}
 		transforms = append(transforms, tr)
 	}
 
-	// Read color cache bit.
-	useCCBits := 0
-	if br.readBit() == 1 {
-		useCCBits = int(br.readBits(4))
-	}
-
-	// Compute effective dimensions for palette transform (width may be compressed).
-	decWidth := width
-	var palTransform *transform
-	for i := range transforms {
-		if transforms[i].kind == transformPalette {
-			palTransform = &transforms[i]
-			// Width for palette uses paletteBits pixels per pixel.
-			palSize := len(palTransform.palette)
-			bits := 0
-			for (1 << bits) < palSize {
-				bits++
-			}
-			pixPerByte := 8 / max1(bits)
-			if pixPerByte > 1 {
-				decWidth = (width + pixPerByte - 1) / pixPerByte
-			}
-		}
-	}
-	_ = decWidth
-
 	// Read the main Huffman trees and pixel data.
-	pixels, err := decodeLiteralImage(br, width, height, useCCBits)
+	// decodeLiteralImage reads the color-cache bit internally.
+	pixels, err := decodeLiteralImage(br, width, height)
 	if err != nil {
 		return nil, fmt.Errorf("vp8ldec: pixel data: %w", err)
 	}
@@ -430,8 +398,14 @@ func decodeVP8L(data []byte) (image.Image, error) {
 }
 
 // decodeLiteralImage decodes a VP8L pixel stream (used for both the main image
-// and transform data images).
-func decodeLiteralImage(br *bitReader, width, height, ccBits int) ([]uint32, error) {
+// and transform data images). The color-cache bit is always read here, matching
+// the VP8L sub-image format emitted by writeMiniImage.
+func decodeLiteralImage(br *bitReader, width, height int) ([]uint32, error) {
+	// Read color cache bit (always present in VP8L sub-image format).
+	ccBits := 0
+	if br.readBit() == 1 {
+		ccBits = int(br.readBits(4))
+	}
 	ccSize := 0
 	if ccBits > 0 {
 		ccSize = 1 << ccBits
@@ -592,29 +566,25 @@ func applySubGreenInverse(pixels []uint32, width, height int) {
 func applyPredictorInverse(pixels []uint32, width, height, tileBits int, tileData []uint32) {
 	tileW := (width + (1<<tileBits) - 1) >> tileBits
 
-	getMode := func(x, y int) int {
-		tx := x >> tileBits
-		ty := y >> tileBits
-		return int(tileData[ty*tileW+tx]>>8) & 0xFF
-	}
-
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
+			idx := y*width + x
 			if x == 0 && y == 0 {
-				continue // top-left: predictor = 0xFF000000
+				pixels[0] = addARGB(pixels[0], 0xFF000000)
+				continue
 			}
-			mode := 0
-			if x == 0 && y > 0 {
-				mode = 0 // left column: predictor is top pixel
-			} else if y == 0 {
-				mode = 0 // top row
+			var mode int
+			if y == 0 {
+				mode = 1 // top row: left predictor
+			} else if x == 0 {
+				mode = 2 // left column: top predictor
 			} else {
-				mode = getMode(x, y)
+				tx := x >> tileBits
+				ty := y >> tileBits
+				mode = int(tileData[ty*tileW+tx]>>8) & 0xFF
 			}
-
-			cur := pixels[y*width+x]
 			pred := getPrediction(mode, x, y, width, pixels)
-			pixels[y*width+x] = addARGB(cur, pred)
+			pixels[idx] = addARGB(pixels[idx], pred)
 		}
 	}
 }
@@ -647,13 +617,7 @@ func getPrediction(mode, x, y, width int, pixels []uint32) uint32 {
 
 	switch mode {
 	case 0:
-		if y == 0 {
-			if x == 0 {
-				return 0xFF000000
-			}
-			return left()
-		}
-		return top()
+		return 0xFF000000
 	case 1:
 		return left()
 	case 2:
@@ -720,10 +684,10 @@ func clampAddSubFull(left, top, topLeft uint32) uint32 {
 }
 
 func clampAddSubHalf(avg, topLeft uint32) uint32 {
-	ra := clamp8i(int32(avg>>24&0xFF) + int32(avg>>24&0xFF) - int32(topLeft>>24&0xFF))
-	rr := clamp8i(int32(avg>>16&0xFF) + int32(avg>>16&0xFF) - int32(topLeft>>16&0xFF))
-	rg := clamp8i(int32(avg>>8&0xFF) + int32(avg>>8&0xFF) - int32(topLeft>>8&0xFF))
-	rb := clamp8i(int32(avg&0xFF) + int32(avg&0xFF) - int32(topLeft&0xFF))
+	ra := clamp8i(int32(avg>>24&0xFF) + (int32(avg>>24&0xFF)-int32(topLeft>>24&0xFF))/2)
+	rr := clamp8i(int32(avg>>16&0xFF) + (int32(avg>>16&0xFF)-int32(topLeft>>16&0xFF))/2)
+	rg := clamp8i(int32(avg>>8&0xFF) + (int32(avg>>8&0xFF)-int32(topLeft>>8&0xFF))/2)
+	rb := clamp8i(int32(avg&0xFF) + (int32(avg&0xFF)-int32(topLeft&0xFF))/2)
 	return ra<<24 | rr<<16 | rg<<8 | rb
 }
 
