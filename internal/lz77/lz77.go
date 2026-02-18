@@ -58,23 +58,21 @@ func (t Token) LengthExtra() int { return lengthExtra(t.length) }
 func LengthExtraBits(code int) int { return lengthExtraBits(code) }
 
 // DistCode returns the VP8L distance code (0..39) for a back-reference token.
+// t.dist holds the pre-computed VP8L coded distance (set at tokenize time).
 func (t Token) DistCode() int {
-	vDist := toVP8LDist(t.dist)
-	dc, _, _ := distCodeOf(vDist)
+	dc, _, _ := distCodeOf(t.dist)
 	return dc
 }
 
 // DistExtra returns the extra bits value for the distance code.
 func (t Token) DistExtra() int {
-	vDist := toVP8LDist(t.dist)
-	_, de, _ := distCodeOf(vDist)
+	_, de, _ := distCodeOf(t.dist)
 	return de
 }
 
 // DistExtraBits returns how many extra bits the distance code carries.
 func (t Token) DistExtraBits() int {
-	vDist := toVP8LDist(t.dist)
-	_, _, bits := distCodeOf(vDist)
+	_, _, bits := distCodeOf(t.dist)
 	return bits
 }
 
@@ -167,32 +165,60 @@ var distOffsets = [120][2]int{
 	{-6, 7}, {7, 6}, {-7, 6}, {8, 5}, {8, 6}, {7, 7}, {-7, 7}, {8, 7},
 }
 
-// toVP8LDist converts a linear pixel distance (1-based) to the VP8L coded
-// distance (also 1-based). It looks up the spatial offset table to see if
-// the distance corresponds to one of the first 120 entries.
-func toVP8LDist(pixDist int) int {
-	// Check spatial table.
-	// This is an O(120) scan. For encoding performance we could invert the table,
-	// but correctness matters more here.
-	// We just return pixDist + 120 (the generic form) unless the spatial table
-	// provides a smaller code. Actually we need to find the spatial code.
-	// The VP8L spec §7.2.3: "pixel_dist = max(1, dy*width + abs(dx))" is the
-	// formula. We have the pixel_dist; we must emit the VP8L dist (1-based index
-	// into the spatial table if it exists, else pixel_dist + 120).
-	// We do a reverse lookup here. For performance on the encoder side, we
-	// precompute a map. But for correctness we just emit pixel_dist + 120
-	// (the generic fallback), which is always valid even if not optimal.
+// buildSpatialTable builds a reverse lookup from linear pixel distance to the
+// optimal VP8L raw distance code (5..120) for the given image width.
+//
+// Background: VP8L distance Huffman codes 0..3 decode as pixel distances 1..4
+// directly (the decoder returns code+1 without consulting the spatial table).
+// Therefore only spatial entries 4..119 (VP8L raw distances 5..120) can be
+// used through the spatial path. For pixel distances 1..4, linearToVP8LDist
+// uses raw distances 1..4 directly (→ codes 0..3).
+func buildSpatialTable(width int) map[int]int {
+	table := make(map[int]int, 116)
+	for k := 4; k < len(distOffsets); k++ {
+		off := distOffsets[k]
+		// VP8L pixel distance = dy*width + dx (signed, matching the decoder).
+		pd := off[1]*width + off[0]
+		if pd < 1 {
+			pd = 1
+		}
+		// Keep only the smallest (first) VP8L code for each pixel distance.
+		if _, exists := table[pd]; !exists {
+			table[pd] = k + 1 // 1-indexed VP8L raw distance (5..120)
+		}
+	}
+	return table
+}
+
+// linearToVP8LDist converts a linear pixel array distance to the best VP8L
+// raw distance value:
+//   - Pixel dists 1..4 map directly to VP8L raw dists 1..4 (Huffman codes 0..3),
+//     which the decoder returns as pixel distances 1..4 without spatial lookup.
+//   - Larger pixel dists use the pre-built spatial table when possible, falling
+//     back to the generic form (pixDist+120) otherwise.
+func linearToVP8LDist(pixDist int, spatialTable map[int]int) int {
+	if pixDist <= 4 {
+		return pixDist // VP8L raw dist 1..4 → Huffman codes 0..3
+	}
+	if code, ok := spatialTable[pixDist]; ok {
+		return code
+	}
 	return pixDist + 120
 }
 
 // Tokenise converts the flat pixel array to a VP8L token stream using LZ77
 // hash-chain matching with the given window and chain-depth parameters.
 // ccBits > 0 enables color cache references.
+// Token.dist for backward references stores the pre-computed VP8L coded
+// distance (using the spatial table for the given width where possible).
 func Tokenise(pixels []uint32, width, lz77Window, chainDepth, ccBits int) []Token {
 	n := len(pixels)
 	if n == 0 || lz77Window == 0 {
 		return literalTokens(pixels, ccBits)
 	}
+
+	// Pre-build reverse spatial table for this image width.
+	spatialTable := buildSpatialTable(width)
 
 	// Color cache.
 	var colorCache []uint32
@@ -235,7 +261,8 @@ func Tokenise(pixels []uint32, width, lz77Window, chainDepth, ccBits int) []Toke
 		if i >= 1 {
 			bestLen, bestDist := findBestMatch(pixels, i, n, width, lz77Window, chainDepth, hashHead, prev)
 			if bestLen >= 1 {
-				tokens = append(tokens, NewBackref(bestLen, bestDist))
+				vp8lDist := linearToVP8LDist(bestDist, spatialTable)
+				tokens = append(tokens, NewBackref(bestLen, vp8lDist))
 				// Advance i and update hash for each consumed pixel.
 				for k := 0; k < bestLen && i < n; k++ {
 					if ccBits > 0 {

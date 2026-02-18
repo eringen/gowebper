@@ -115,7 +115,7 @@ func TestTokenise_withRepeat(t *testing.T) {
 	tokens := Tokenise(pixels, 10, 1024, 4, 0)
 
 	// Must decode back to same pixels.
-	decoded := decodeTokens(tokens)
+	decoded := decodeTokens(tokens, 10)
 	if len(decoded) != len(pixels) {
 		t.Fatalf("decoded %d pixels, want %d", len(decoded), len(pixels))
 	}
@@ -145,6 +145,46 @@ func TestTokenise_empty(t *testing.T) {
 	}
 }
 
+func TestLinearToVP8LDist_smallDists(t *testing.T) {
+	// Pixel distances 1..4 must map to VP8L raw dists 1..4 (Huffman codes 0..3)
+	// so the decoder returns them as pixel distances directly.
+	table := buildSpatialTable(32)
+	for d := 1; d <= 4; d++ {
+		got := linearToVP8LDist(d, table)
+		if got != d {
+			t.Errorf("linearToVP8LDist(%d, width=32) = %d, want %d", d, got, d)
+		}
+	}
+}
+
+func TestLinearToVP8LDist_spatialOptimisation(t *testing.T) {
+	// For width=32, pixel dist 2*32=64 corresponds to spatial entry {0,2}
+	// (VP8L raw dist 5, Huffman code 4) which is better than the generic 64+120=184.
+	const width = 32
+	table := buildSpatialTable(width)
+	pixDist := 2 * width // one row above
+	got := linearToVP8LDist(pixDist, table)
+	if got >= pixDist+120 {
+		t.Errorf("expected spatial code for pixDist=%d, got %d (generic would be %d)", pixDist, got, pixDist+120)
+	}
+	// Roundtrip: vp8lDistToLinear should recover the original pixel dist.
+	if back := vp8lDistToLinear(got, width); back != pixDist {
+		t.Errorf("roundtrip: linearToVP8LDist(%d)=%d, vp8lDistToLinear=%d, want %d", pixDist, got, back, pixDist)
+	}
+}
+
+func TestLinearToVP8LDist_genericFallback(t *testing.T) {
+	// An uncommon distance (prime > 120) has no spatial entry and should
+	// use the generic encoding.
+	const width = 32
+	table := buildSpatialTable(width)
+	pixDist := 997
+	got := linearToVP8LDist(pixDist, table)
+	if got != pixDist+120 {
+		t.Errorf("linearToVP8LDist(%d, width=%d) = %d, want %d (generic)", pixDist, width, got, pixDist+120)
+	}
+}
+
 func TestDistCodeOf(t *testing.T) {
 	// Small distances should have code < 4.
 	code, _, _ := distCodeOf(1)
@@ -157,14 +197,34 @@ func TestDistCodeOf(t *testing.T) {
 	}
 }
 
+// vp8lDistToLinear converts a VP8L raw distance back to a linear pixel array
+// distance, given the image width. Mirrors what the VP8L decoder does:
+// codes 0..3 → pixel dists 1..4 (no spatial lookup); raw dists 5..120 →
+// spatial lookup; raw dists > 120 → raw dist - 120.
+func vp8lDistToLinear(vp8lDist, width int) int {
+	if vp8lDist <= 4 {
+		return vp8lDist // codes 0..3 give pixel dists 1..4 directly
+	}
+	if vp8lDist <= 120 {
+		off := distOffsets[vp8lDist-1]
+		pd := off[1]*width + off[0]
+		if pd < 1 {
+			return 1
+		}
+		return pd
+	}
+	return vp8lDist - 120
+}
+
 // decodeTokens simulates VP8L decoding of tokens to recover pixels.
-func decodeTokens(tokens []Token) []uint32 {
+func decodeTokens(tokens []Token, width int) []uint32 {
 	var out []uint32
 	for _, tok := range tokens {
 		if tok.IsLiteral() {
 			out = append(out, tok.Pixel())
 		} else if !tok.IsColorCache() {
-			src := len(out) - tok.dist
+			linearDist := vp8lDistToLinear(tok.dist, width)
+			src := len(out) - linearDist
 			if src < 0 {
 				src = 0
 			}
