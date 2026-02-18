@@ -1,6 +1,7 @@
 package gowebper_test
 
 import (
+	"bytes"
 	"image"
 	"image/color"
 	"testing"
@@ -215,5 +216,106 @@ func TestEncode_RIFF_header(t *testing.T) {
 	}
 	if string(data[12:16]) != "VP8L" {
 		t.Errorf("expected VP8L, got %q", data[12:16])
+	}
+}
+
+// roundTripWithQuality encodes with the given level+quality and decodes.
+func roundTripWithQuality(t *testing.T, img image.Image, level, quality int) (image.Image, []byte) {
+	t.Helper()
+	data, err := gowebper.EncodeToBytes(img, &gowebper.Options{Level: level, Quality: quality})
+	if err != nil {
+		t.Fatalf("level=%d quality=%d encode: %v", level, quality, err)
+	}
+	decoded, err := vp8ldec.DecodeBytes(data)
+	if err != nil {
+		t.Fatalf("level=%d quality=%d decode: %v", level, quality, err)
+	}
+	return decoded, data
+}
+
+func TestQuality_zero_isLossless(t *testing.T) {
+	img := makeGradient(32, 32)
+	data0, err := gowebper.EncodeToBytes(img, &gowebper.Options{Level: 6})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dataQ, err := gowebper.EncodeToBytes(img, &gowebper.Options{Level: 6, Quality: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(data0, dataQ) {
+		t.Error("Quality=0 produced different output than no Quality field")
+	}
+}
+
+func TestQuality_100_isLossless(t *testing.T) {
+	img := makeGradient(16, 16)
+	got, _ := roundTripWithQuality(t, img, 0, 100)
+	compareImages(t, img, got, "quality=100 round-trip")
+}
+
+func TestQuality_producesValidWebP(t *testing.T) {
+	img := makeGradient(32, 32)
+	for _, q := range []int{1, 10, 25, 50, 75, 90, 99} {
+		_, data := roundTripWithQuality(t, img, 0, q)
+		if len(data) == 0 {
+			t.Errorf("quality=%d: empty output", q)
+		}
+	}
+}
+
+func TestQuality_alphaPreserved(t *testing.T) {
+	// Semi-transparent image: each pixel has a distinct alpha.
+	img := image.NewNRGBA(image.Rect(0, 0, 16, 16))
+	for y := 0; y < 16; y++ {
+		for x := 0; x < 16; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{
+				R: uint8(x * 16),
+				G: uint8(y * 16),
+				B: 128,
+				A: uint8((x + y) * 8),
+			})
+		}
+	}
+	for _, q := range []int{1, 50, 99} {
+		got, _ := roundTripWithQuality(t, img, 0, q)
+		b := img.Bounds()
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				_, _, _, wa := img.At(x, y).RGBA()
+				_, _, _, ga := got.At(x, y).RGBA()
+				if wa != ga {
+					t.Errorf("quality=%d: alpha mismatch at (%d,%d): want %d got %d", q, x, y, wa>>8, ga>>8)
+				}
+			}
+		}
+	}
+}
+
+func TestQuality_fileSizeDecreases(t *testing.T) {
+	img := makeGradient(64, 64)
+	_, dataLow := roundTripWithQuality(t, img, 0, 1)
+	_, dataHigh := roundTripWithQuality(t, img, 0, 75)
+	if len(dataLow) >= len(dataHigh) {
+		t.Errorf("quality=1 (%d bytes) is not smaller than quality=75 (%d bytes)", len(dataLow), len(dataHigh))
+	}
+}
+
+func TestQuality_RIFFValid(t *testing.T) {
+	img := makeGradient(16, 16)
+	for _, q := range []int{1, 50, 99} {
+		_, data := roundTripWithQuality(t, img, 0, q)
+		if len(data) < 20 {
+			t.Fatalf("quality=%d: output too short (%d bytes)", q, len(data))
+		}
+		if string(data[0:4]) != "RIFF" {
+			t.Errorf("quality=%d: expected RIFF, got %q", q, data[0:4])
+		}
+		if string(data[8:12]) != "WEBP" {
+			t.Errorf("quality=%d: expected WEBP, got %q", q, data[8:12])
+		}
+		if string(data[12:16]) != "VP8L" {
+			t.Errorf("quality=%d: expected VP8L, got %q", q, data[12:16])
+		}
 	}
 }

@@ -29,6 +29,14 @@ type Options struct {
 	// The zero value (0) means LevelFastest, not LevelDefault. To get the
 	// default level use LevelDefault or a nil *Options.
 	Level int
+
+	// Quality controls lossy pre-quantization (0-100).
+	// 0 (zero value / default) means fully lossless -- identical to current behaviour.
+	// 1-100 applies near-lossless pre-processing by rounding RGB channels to fewer
+	// significant bits. Quality 100 = minimal rounding (near-lossless). Quality 1 =
+	// maximum rounding (smallest file, visible loss). Alpha is never modified.
+	// Quality and Level are orthogonal.
+	Quality int
 }
 
 // Encode writes m to w as a lossless WebP (VP8L) file.
@@ -68,6 +76,12 @@ func NewEncoder(opts *Options) *Encoder {
 	if e.opts.Level > 9 {
 		e.opts.Level = 9
 	}
+	if e.opts.Quality < 0 {
+		e.opts.Quality = 0
+	}
+	if e.opts.Quality > 100 {
+		e.opts.Quality = 100
+	}
 	return e
 }
 
@@ -83,6 +97,11 @@ func (e *Encoder) Encode(w io.Writer, m image.Image) error {
 	// Convert image to ARGB pixels.
 	pixels := colormodel.ToARGB(m)
 	hasAlpha := colormodel.HasAlpha(pixels)
+
+	// Apply near-lossless pre-quantization if Quality is set.
+	if e.opts.Quality > 0 {
+		quantizePixels(pixels, qualityToShift(e.opts.Quality))
+	}
 
 	// Encode the VP8L bitstream.
 	vp8lBytes, err := e.encodeVP8L(pixels, width, height, hasAlpha)
