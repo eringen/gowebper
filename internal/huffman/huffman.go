@@ -45,7 +45,14 @@ func (b *Builder) AddN(sym, n int) {
 
 // Build constructs a length-limited canonical Huffman tree (max 15 bits).
 func (b *Builder) Build() *Tree {
-	return buildTree(b.freq, b.size)
+	return buildTreeMaxLen(b.freq, b.size, maxCodeLen)
+}
+
+// BuildMaxLen constructs a length-limited canonical Huffman tree with the
+// given maximum code length. VP8L code-length-of-code-lengths are stored
+// in 3 bits, so the CL tree must use maxLen = 7.
+func (b *Builder) BuildMaxLen(maxLen int) *Tree {
+	return buildTreeMaxLen(b.freq, b.size, maxLen)
 }
 
 // BuildFromLengths constructs a canonical Huffman tree from explicit code lengths.
@@ -58,6 +65,27 @@ func BuildFromLengths(lengths []int) *Tree {
 	copy(t.Lengths, lengths)
 	assignCanonicalCodes(t)
 	return t
+}
+
+// ZeroSingleSymbol sets all code lengths to 0 if the tree has only one active
+// symbol. VP8L single-symbol trees consume 0 bits per read during decoding,
+// even though the tree header stores code length 1. Call this AFTER WriteTo so
+// the header is emitted correctly, then pixel encoding emits 0 bits per symbol.
+func (t *Tree) ZeroSingleSymbol() {
+	count := 0
+	for i := 0; i < t.AlphabetSize; i++ {
+		if t.Lengths[i] > 0 {
+			count++
+			if count > 1 {
+				return
+			}
+		}
+	}
+	if count == 1 {
+		for i := range t.Lengths {
+			t.Lengths[i] = 0
+		}
+	}
 }
 
 // BitCost returns the total bit cost to encode all symbols given their frequencies.
@@ -112,7 +140,7 @@ func (h *huffHeap) Pop() interface{} {
 	return x
 }
 
-func buildTree(freq []uint32, size int) *Tree {
+func buildTreeMaxLen(freq []uint32, size, maxLen int) *Tree {
 	t := &Tree{
 		Codes:        make([]uint32, size),
 		Lengths:      make([]int, size),
@@ -164,8 +192,8 @@ func buildTree(freq []uint32, size int) *Tree {
 	root := heap.Pop(h).(*huffNode)
 	extractLengths(root, 0, t.Lengths)
 
-	// Limit lengths to maxCodeLen.
-	limitLengths(t.Lengths, size, maxCodeLen)
+	// Limit lengths to maxLen.
+	limitLengths(t.Lengths, size, maxLen)
 
 	assignCanonicalCodes(t)
 	return t

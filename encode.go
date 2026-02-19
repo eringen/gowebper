@@ -311,6 +311,15 @@ func encodePixelStream(bw *bitwriter.BitWriter, pixels []uint32, width, height, 
 	aTree.WriteTo(bw)
 	dTree.WriteTo(bw)
 
+	// VP8L single-symbol trees consume 0 bits per read. After writing the
+	// tree header (which stores code length 1), zero the lengths so the
+	// pixel encoding loop emits 0 bits for these channels.
+	gTree.ZeroSingleSymbol()
+	rTree.ZeroSingleSymbol()
+	bTree.ZeroSingleSymbol()
+	aTree.ZeroSingleSymbol()
+	dTree.ZeroSingleSymbol()
+
 	// Write token stream.
 	if len(tokens) > 0 {
 		writeTokenStream(bw, tokens, gTree, rTree, bTree, aTree, dTree)
@@ -487,6 +496,12 @@ func writeMiniImage(bw *bitwriter.BitWriter, pixels []uint32, width, height int)
 	bTree.WriteTo(bw)
 	aTree.WriteTo(bw)
 	dTree.WriteTo(bw)
+
+	gTree.ZeroSingleSymbol()
+	rTree.ZeroSingleSymbol()
+	bTree.ZeroSingleSymbol()
+	aTree.ZeroSingleSymbol()
+	dTree.ZeroSingleSymbol()
 
 	for _, p := range pixels {
 		g := int(p >> 8 & 0xFF)

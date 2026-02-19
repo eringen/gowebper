@@ -62,6 +62,13 @@ func buildSimpleVP8L(t *testing.T, w, h int, pixels []uint32) []byte {
 	aTree.WriteTo(bw)
 	dTree.WriteTo(bw)
 
+	// VP8L single-symbol trees consume 0 bits per read.
+	gTree.ZeroSingleSymbol()
+	rTree.ZeroSingleSymbol()
+	bTree.ZeroSingleSymbol()
+	aTree.ZeroSingleSymbol()
+	dTree.ZeroSingleSymbol()
+
 	// Write literal pixels.
 	for _, p := range pixels {
 		a := int(p >> 24)

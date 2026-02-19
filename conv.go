@@ -28,7 +28,7 @@ func main() {
 	defer out.Close()
 
 	err = gowebper.Encode(out, img, &gowebper.Options{
-		Level:   9,
+		Level:   0,
 		Quality: 50,
 	})
 	if err != nil {

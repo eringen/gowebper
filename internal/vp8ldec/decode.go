@@ -82,16 +82,17 @@ func (br *bitReader) readBit() int {
 type huffTree struct {
 	// For small alphabets: direct lookup by code.
 	// We use a symbol table indexed by reversed code.
-	maxLen  int
-	table   []int16 // indexed by bit-reversed code; -1 = invalid
-	lengths []int
+	maxLen    int
+	table     []int16 // indexed by bit-reversed code; -1 = invalid
+	lengths   []int
+	singleSym int // >= 0 if tree has exactly 1 symbol (0 bits consumed per read)
 }
 
 func buildHuffTree(lengths []int, alphabetSize int) (*huffTree, error) {
 	if alphabetSize == 0 {
 		return nil, errors.New("empty alphabet")
 	}
-	t := &huffTree{lengths: make([]int, alphabetSize)}
+	t := &huffTree{lengths: make([]int, alphabetSize), singleSym: -1}
 	copy(t.lengths, lengths)
 
 	// Find max length.
@@ -150,10 +151,10 @@ func buildHuffTree(lengths []int, alphabetSize int) (*huffTree, error) {
 }
 
 func (t *huffTree) readSymbol(br *bitReader) (int, error) {
-	br.fill()
-	if t.maxLen == 0 {
-		return 0, nil
+	if t.singleSym >= 0 {
+		return t.singleSym, nil // 0 bits consumed
 	}
+	br.fill()
 	peek := uint32(br.bits & ((1 << t.maxLen) - 1))
 	sym := t.table[peek]
 	if sym < 0 {
@@ -188,27 +189,36 @@ func readHuffTree(br *bitReader, alphabetSize int) (*huffTree, error) {
 
 func readSimpleHuffTree(br *bitReader, alphabetSize int) (*huffTree, error) {
 	numSymbols := int(br.readBits(1)) + 1
-	symBits := symBitsForAlphabet(alphabetSize)
-	sym1 := int(br.readBits(symBits))
+	isFirst8bits := int(br.readBits(1))
+	sym1 := int(br.readBits(1 + 7*isFirst8bits))
+	if sym1 >= alphabetSize {
+		return nil, fmt.Errorf("vp8ldec: simple tree symbol %d >= alphabet %d", sym1, alphabetSize)
+	}
 	lengths := make([]int, alphabetSize)
 	if numSymbols == 1 {
-		lengths[sym1] = 1
-	} else {
-		sym2 := int(br.readBits(symBits))
-		if sym1 > sym2 {
-			sym1, sym2 = sym2, sym1
+		// Single-symbol tree: 0 bits consumed per read.
+		// VP8L spec: "no bits are consumed when that single leaf node tree is used."
+		t := &huffTree{
+			maxLen:    0,
+			lengths:   lengths,
+			singleSym: sym1,
 		}
-		lengths[sym1] = 1
-		lengths[sym2] = 1
+		return t, nil
 	}
-	return buildHuffTree(lengths, alphabetSize)
-}
-
-func symBitsForAlphabet(alphabetSize int) int {
-	if alphabetSize <= 2 {
-		return 1
+	sym2 := int(br.readBits(8))
+	if sym2 >= alphabetSize {
+		return nil, fmt.Errorf("vp8ldec: simple tree symbol %d >= alphabet %d", sym2, alphabetSize)
 	}
-	return 8
+	if sym1 > sym2 {
+		sym1, sym2 = sym2, sym1
+	}
+	lengths[sym1] = 1
+	lengths[sym2] = 1
+	t, err := buildHuffTree(lengths, alphabetSize)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
 }
 
 var codeLenOrder = [19]int{17, 18, 0, 1, 2, 3, 4, 5, 16, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
@@ -228,11 +238,21 @@ func readNormalHuffTree(br *bitReader, alphabetSize int) (*huffTree, error) {
 		return nil, fmt.Errorf("vp8ldec: code-length tree: %w", err)
 	}
 
+	// Read max_symbol flag.
+	maxSymbol := alphabetSize
+	if br.readBit() == 1 {
+		lengthNbits := 2 + 2*int(br.readBits(3))
+		maxSymbol = 2 + int(br.readBits(lengthNbits))
+		if maxSymbol > alphabetSize {
+			maxSymbol = alphabetSize
+		}
+	}
+
 	// Decode the code-length sequence.
 	lengths := make([]int, alphabetSize)
 	i := 0
 	prevLen := 0
-	for i < alphabetSize {
+	for i < maxSymbol {
 		sym, err := clTree.readSymbol(br)
 		if err != nil {
 			return nil, fmt.Errorf("vp8ldec: code-length sequence at symbol %d: %w", i, err)

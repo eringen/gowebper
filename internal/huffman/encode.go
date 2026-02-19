@@ -32,46 +32,35 @@ func (t *Tree) WriteTo(bw *bitwriter.BitWriter) {
 
 // writeSimpleTree writes the VP8L simple-code-length-code form.
 // Used when the alphabet contains only 1 or 2 symbols.
+//
+// VP8L spec format:
+//
+//	simple_code_length_code  1 bit  (= 1)
+//	num_symbols - 1          1 bit
+//	is_first_8bits           1 bit  (0 → 1-bit symbol, 1 → 8-bit symbol)
+//	first_symbol             1 or 8 bits
+//	[second_symbol]          8 bits (only when num_symbols == 2)
 func writeSimpleTree(bw *bitwriter.BitWriter, alphabetSize, numSymbols, sym1, sym2 int) {
-	bw.WriteBits(1, 1) // simple_code_lengths_code = 1
-
-	// Determine the number of bits needed to represent the symbol values.
-	// VP8L spec: if symbols fit in 1 bit -> 1; if up to 8 bits -> 8; else -> enough bits.
-	// We use 1 bit for the count (0 = one symbol, 1 = two symbols).
+	bw.WriteBits(1, 1)                    // simple_code_length_code = 1
 	bw.WriteBits(uint32(numSymbols-1), 1) // num_symbols - 1
 
-	if numSymbols == 1 {
-		// Symbol value: use the minimum number of bits.
-		// VP8L uses 8 bits for symbol value in simple mode (0..255) or 1 bit if value is 0/1.
-		// We conservatively use enough bits to cover the alphabet.
-		symBits := bitsForSymbol(alphabetSize)
-		bw.WriteBits(uint32(sym1), symBits)
-	} else {
-		// Two symbols. Encode both with enough bits.
-		symBits := bitsForSymbol(alphabetSize)
-		// First symbol must be the smaller one.
-		if sym1 > sym2 {
-			sym1, sym2 = sym2, sym1
-		}
-		bw.WriteBits(uint32(sym1), symBits)
-		bw.WriteBits(uint32(sym2), symBits)
+	if numSymbols == 2 && sym1 > sym2 {
+		sym1, sym2 = sym2, sym1
 	}
-}
 
-// bitsForSymbol returns the number of bits to encode a symbol index in [0, alphabetSize).
-func bitsForSymbol(alphabetSize int) int {
-	if alphabetSize <= 2 {
-		return 1
+	// is_first_8bits: 0 if the first symbol fits in 1 bit (value 0 or 1),
+	// 1 if it needs 8 bits.
+	if sym1 > 1 {
+		bw.WriteBits(1, 1)           // is_first_8bits = 1
+		bw.WriteBits(uint32(sym1), 8) // first_symbol (8 bits)
+	} else {
+		bw.WriteBits(0, 1)           // is_first_8bits = 0
+		bw.WriteBits(uint32(sym1), 1) // first_symbol (1 bit)
 	}
-	bits := 1
-	for (1 << bits) < alphabetSize {
-		bits++
+
+	if numSymbols == 2 {
+		bw.WriteBits(uint32(sym2), 8) // second_symbol (always 8 bits)
 	}
-	// VP8L simple mode allows 1 or 8 bits.
-	if bits <= 1 {
-		return 1
-	}
-	return 8
 }
 
 // writeNormalTree writes the normal code-length-code form.
@@ -86,7 +75,7 @@ func writeNormalTree(bw *bitwriter.BitWriter, t *Tree) {
 	for _, cl := range clSeq {
 		clBuilder.Add(cl.sym)
 	}
-	clTree := clBuilder.Build()
+	clTree := clBuilder.BuildMaxLen(7) // VP8L CL code lengths are stored in 3 bits (0..7)
 
 	// Determine how many code-length codes to emit (trim trailing zeros but
 	// keep at least 4 as required by VP8L).
@@ -101,6 +90,9 @@ func writeNormalTree(bw *bitwriter.BitWriter, t *Tree) {
 	for i := 0; i < numCLCodes; i++ {
 		bw.WriteBits(uint32(clTree.Lengths[codeLenOrder[i]]), 3)
 	}
+
+	// max_symbol flag: 0 means use the full alphabet size.
+	bw.WriteBits(0, 1)
 
 	// Emit the compressed code-length sequence.
 	for _, cl := range clSeq {
