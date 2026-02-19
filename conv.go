@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	f, err := os.Open("test2.png")
+	f, err := os.Open("test.png")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	out, err := os.Create("test2.webp")
+	out, err := os.Create("test.webp")
 	if err != nil {
 		log.Fatal(err)
 	}
