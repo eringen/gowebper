@@ -213,7 +213,12 @@ func extractLengths(n *huffNode, depth int, lengths []int) {
 	}
 }
 
-// limitLengths adjusts lengths so none exceeds maxLen, maintaining Kraft validity.
+// limitLengths adjusts lengths so none exceeds maxLen, maintaining Kraft equality.
+//
+// After clamping codes deeper than maxLen, the Kraft sum exceeds 2^maxLen
+// (overcomplete). We reduce it by lengthening codes (increasing depth).
+// The algorithm works on bit-length counts to guarantee exact Kraft equality
+// without overshoot, then reassigns lengths to individual symbols.
 func limitLengths(lengths []int, size, maxLen int) {
 	// Clamp any depths exceeding maxLen.
 	clamped := false
@@ -227,45 +232,65 @@ func limitLengths(lengths []int, size, maxLen int) {
 		return
 	}
 
-	// Compute Kraft excess in units of 2^maxLen:
-	// excess = sum(2^(maxLen - l_i)) - 2^maxLen
-	// Positive excess means Kraft inequality is violated; we must lengthen codes.
-	excess := -(int64(1) << maxLen)
-	for _, l := range lengths {
-		if l > 0 {
-			excess += int64(1) << (maxLen - l)
+	// Count bit-length frequencies.
+	blCount := make([]int, maxLen+1)
+	for i := 0; i < size; i++ {
+		if lengths[i] > 0 {
+			blCount[lengths[i]]++
 		}
+	}
+
+	// Compute Kraft excess in units of 2^maxLen.
+	excess := -(int64(1) << maxLen)
+	for d := 1; d <= maxLen; d++ {
+		excess += int64(blCount[d]) << (maxLen - d)
 	}
 	if excess <= 0 {
 		return
 	}
 
-	// Sort symbols by length descending (longest first = rarest = best to lengthen).
-	type entry struct{ idx, depth int }
+	// Reduce excess by lengthening codes from shallowest to deepest.
+	// Lengthening a code from depth d to d+1 reduces Kraft sum by 2^(maxLen-d-1).
+	// Processing largest reductions first (like binary decomposition of excess)
+	// guarantees we reach exactly 0 without overshoot.
+	for d := 1; d < maxLen && excess > 0; d++ {
+		reduction := int64(1) << (maxLen - d - 1)
+		// How many codes at depth d can we lengthen?
+		n := int(excess / reduction)
+		if n > blCount[d] {
+			n = blCount[d]
+		}
+		blCount[d] -= n
+		blCount[d+1] += n
+		excess -= int64(n) * reduction
+	}
+
+	// Reassign lengths to symbols based on the adjusted distribution.
+	// Symbols with the deepest original depths keep the deepest new depths,
+	// preserving the property that rare symbols get longer codes.
+	type entry struct {
+		idx     int
+		origLen int
+	}
 	entries := make([]entry, 0, size)
-	for i, l := range lengths {
-		if l > 0 && l < maxLen {
-			entries = append(entries, entry{i, l})
+	for i := 0; i < size; i++ {
+		if lengths[i] > 0 {
+			entries = append(entries, entry{i, lengths[i]})
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].depth > entries[j].depth
+		if entries[i].origLen != entries[j].origLen {
+			return entries[i].origLen > entries[j].origLen
+		}
+		return entries[i].idx < entries[j].idx
 	})
 
-	// Lengthen codes until excess is resolved.
-	for excess > 0 {
-		changed := false
-		for i := range entries {
-			if entries[i].depth < maxLen && excess > 0 {
-				entries[i].depth++
-				lengths[entries[i].idx] = entries[i].depth
-				// Lengthening reduces excess by 2^(maxLen - newDepth).
-				excess -= int64(1) << (maxLen - entries[i].depth)
-				changed = true
-			}
-		}
-		if !changed {
-			break
+	// Assign new lengths: deepest first (consume blCount from maxLen down).
+	ei := 0
+	for d := maxLen; d >= 1; d-- {
+		for c := 0; c < blCount[d]; c++ {
+			lengths[entries[ei].idx] = d
+			ei++
 		}
 	}
 }
