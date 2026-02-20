@@ -6,6 +6,10 @@ A pure Go library for encoding images to WebP (VP8L) format with configurable co
 
 gowebper converts `image.Image` values to WebP files using the VP8L bitstream. It is implemented from scratch in pure Go with no external dependencies, not even `golang.org/x/image`. Compression effort is controlled by a `Level` (0-9) and an optional `Quality` (0-100) for lossy pre-quantization.
 
+✅ Pure Go, no CGO — you can build with CGO_ENABLED=0.
+✅ Standalone WebP encode — no external libwebp dependency.
+⚠️ Limited to lossless & simple lossy — doesn’t implement full WebP spec or animations.
+
 ## Installation
 
 ```
