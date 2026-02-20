@@ -149,4 +149,4 @@ Contributions are welcome. Please open an issue before submitting a large change
 
 ## License
 
-MIT
+[MIT](https://github.com/eringen/gowebper/blob/master/LICENSE)
