@@ -146,14 +146,23 @@ func TestTokenise_empty(t *testing.T) {
 }
 
 func TestLinearToVP8LDist_smallDists(t *testing.T) {
-	// Pixel distances 1..4 must map to VP8L raw dists 1..4 (Huffman codes 0..3)
-	// so the decoder returns them as pixel distances directly.
-	table := buildSpatialTable(32)
-	for d := 1; d <= 4; d++ {
-		got := linearToVP8LDist(d, table)
-		if got != d {
-			t.Errorf("linearToVP8LDist(%d, width=32) = %d, want %d", d, got, d)
-		}
+	// Pixel distance 1 (left neighbor) maps to spatial entry {1,0} = plane code 2.
+	// All small distances should round-trip correctly through the spatial table.
+	const width = 32
+	table := buildSpatialTable(width)
+
+	// pixDist=1 → left neighbor → distOffsets[1]={1,0} → plane code 2
+	got := linearToVP8LDist(1, table)
+	back := vp8lDistToLinear(got, width)
+	if back != 1 {
+		t.Errorf("roundtrip pixDist=1: planeCode=%d → back=%d, want 1", got, back)
+	}
+
+	// pixDist=width → above → distOffsets[0]={0,1} → plane code 1
+	got = linearToVP8LDist(width, table)
+	back = vp8lDistToLinear(got, width)
+	if back != width {
+		t.Errorf("roundtrip pixDist=%d: planeCode=%d → back=%d, want %d", width, got, back, width)
 	}
 }
 
@@ -197,14 +206,10 @@ func TestDistCodeOf(t *testing.T) {
 	}
 }
 
-// vp8lDistToLinear converts a VP8L raw distance back to a linear pixel array
+// vp8lDistToLinear converts a VP8L plane code back to a linear pixel array
 // distance, given the image width. Mirrors what the VP8L decoder does:
-// codes 0..3 → pixel dists 1..4 (no spatial lookup); raw dists 5..120 →
-// spatial lookup; raw dists > 120 → raw dist - 120.
+// plane codes 1..120 → spatial lookup; plane codes > 120 → code - 120.
 func vp8lDistToLinear(vp8lDist, width int) int {
-	if vp8lDist <= 4 {
-		return vp8lDist // codes 0..3 give pixel dists 1..4 directly
-	}
 	if vp8lDist <= 120 {
 		off := distOffsets[vp8lDist-1]
 		pd := off[1]*width + off[0]

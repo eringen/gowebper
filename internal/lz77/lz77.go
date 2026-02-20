@@ -166,40 +166,32 @@ var distOffsets = [120][2]int{
 }
 
 // buildSpatialTable builds a reverse lookup from linear pixel distance to the
-// optimal VP8L raw distance code (5..120) for the given image width.
+// optimal VP8L plane code (1..120) for the given image width.
 //
-// Background: VP8L distance Huffman codes 0..3 decode as pixel distances 1..4
-// directly (the decoder returns code+1 without consulting the spatial table).
-// Therefore only spatial entries 4..119 (VP8L raw distances 5..120) can be
-// used through the spatial path. For pixel distances 1..4, linearToVP8LDist
-// uses raw distances 1..4 directly (→ codes 0..3).
+// VP8L uses a 2D spatial distance mapping: each plane code 1..120 maps to
+// a (dx, dy) offset via the distOffsets table. The pixel distance is
+// dy*width + dx. This table inverts that mapping so the encoder can find
+// the smallest plane code for any given pixel distance.
 func buildSpatialTable(width int) map[int]int {
-	table := make(map[int]int, 116)
-	for k := 4; k < len(distOffsets); k++ {
+	table := make(map[int]int, 120)
+	for k := 0; k < len(distOffsets); k++ {
 		off := distOffsets[k]
-		// VP8L pixel distance = dy*width + dx (signed, matching the decoder).
 		pd := off[1]*width + off[0]
 		if pd < 1 {
-			pd = 1
+			continue
 		}
-		// Keep only the smallest (first) VP8L code for each pixel distance.
+		// Keep only the smallest (first) plane code for each pixel distance.
 		if _, exists := table[pd]; !exists {
-			table[pd] = k + 1 // 1-indexed VP8L raw distance (5..120)
+			table[pd] = k + 1 // 1-indexed VP8L plane code (1..120)
 		}
 	}
 	return table
 }
 
 // linearToVP8LDist converts a linear pixel array distance to the best VP8L
-// raw distance value:
-//   - Pixel dists 1..4 map directly to VP8L raw dists 1..4 (Huffman codes 0..3),
-//     which the decoder returns as pixel distances 1..4 without spatial lookup.
-//   - Larger pixel dists use the pre-built spatial table when possible, falling
-//     back to the generic form (pixDist+120) otherwise.
+// plane code value. All pixel distances are looked up in the spatial table;
+// those not found fall back to the generic form (pixDist + 120).
 func linearToVP8LDist(pixDist int, spatialTable map[int]int) int {
-	if pixDist <= 4 {
-		return pixDist // VP8L raw dist 1..4 → Huffman codes 0..3
-	}
 	if code, ok := spatialTable[pixDist]; ok {
 		return code
 	}
