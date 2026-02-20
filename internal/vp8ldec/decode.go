@@ -356,14 +356,14 @@ func decodeVP8L(data []byte) (image.Image, error) {
 			tilesW := (width + (1<<tr.tileBits) - 1) >> tr.tileBits
 			tilesH := (height + (1<<tr.tileBits) - 1) >> tr.tileBits
 			var err error
-			tr.data, err = decodeLiteralImage(br, tilesW, tilesH)
+			tr.data, err = decodeLiteralImage(br, tilesW, tilesH, false)
 			if err != nil {
 				return nil, fmt.Errorf("vp8ldec: transform %d data: %w", kind, err)
 			}
 		case transformPalette:
 			palSize := int(br.readBits(8)) + 1
 			// Palette is stored as a VP8L sub-image (delta-encoded).
-			deltaPal, err := decodeLiteralImage(br, palSize, 1)
+			deltaPal, err := decodeLiteralImage(br, palSize, 1, false)
 			if err != nil {
 				return nil, fmt.Errorf("vp8ldec: palette data: %w", err)
 			}
@@ -379,7 +379,8 @@ func decodeVP8L(data []byte) (image.Image, error) {
 
 	// Read the main Huffman trees and pixel data.
 	// decodeLiteralImage reads the color-cache bit internally.
-	pixels, err := decodeLiteralImage(br, width, height)
+	// isLevel0=true for the main image so the meta-Huffman flag is read.
+	pixels, err := decodeLiteralImage(br, width, height, true)
 	if err != nil {
 		return nil, fmt.Errorf("vp8ldec: pixel data: %w", err)
 	}
@@ -420,7 +421,9 @@ func decodeVP8L(data []byte) (image.Image, error) {
 // decodeLiteralImage decodes a VP8L pixel stream (used for both the main image
 // and transform data images). The color-cache bit is always read here, matching
 // the VP8L sub-image format emitted by writeMiniImage.
-func decodeLiteralImage(br *bitReader, width, height int) ([]uint32, error) {
+// When isLevel0 is true, the meta-Huffman flag is read between the color cache
+// and the Huffman trees (VP8L only reads this at the top-level image).
+func decodeLiteralImage(br *bitReader, width, height int, isLevel0 bool) ([]uint32, error) {
 	// Read color cache bit (always present in VP8L sub-image format).
 	ccBits := 0
 	if br.readBit() == 1 {
@@ -435,6 +438,14 @@ func decodeLiteralImage(br *bitReader, width, height int) ([]uint32, error) {
 	bAlphabetSize := 256
 	aAlphabetSize := 256
 	dAlphabetSize := 40
+
+	// Read meta-Huffman flag (level 0 only).
+	if isLevel0 {
+		useMeta := br.readBit()
+		if useMeta == 1 {
+			return nil, errors.New("vp8ldec: meta-Huffman not supported")
+		}
+	}
 
 	// Read Huffman trees (always a single meta-group for now).
 	gTree, err := readHuffTree(br, gAlphabetSize)
@@ -550,15 +561,18 @@ func readLengthValue(br *bitReader, code int) (int, error) {
 
 // readDistValue decodes a VP8L distance value from a dist code.
 func readDistValue(br *bitReader, code, pixelPos, width int) (int, error) {
+	// Compute raw distance from prefix code + extra bits.
+	var dist int
 	if code < 4 {
-		return code + 1, nil
+		dist = code + 1
+	} else {
+		extraBits := (code - 2) >> 1
+		offset := ((2 + (code & 1)) << extraBits) + 1
+		extra := int(br.readBits(extraBits))
+		dist = offset + extra
 	}
-	extraBits := (code - 2) >> 1
-	offset := ((2 + (code & 1)) << extraBits) + 1
-	extra := int(br.readBits(extraBits))
-	dist := offset + extra
 
-	// Convert from VP8L distance code to pixel distance.
+	// Convert raw distance to pixel distance via spatial table.
 	if dist <= 120 {
 		dx := distTable[dist-1][0]
 		dy := distTable[dist-1][1]

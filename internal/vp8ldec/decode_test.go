@@ -30,6 +30,9 @@ func buildSimpleVP8L(t *testing.T, w, h int, pixels []uint32) []byte {
 	// No color cache.
 	bw.WriteBits(0, 1)
 
+	// No meta-Huffman (use_meta = 0, level 0 only).
+	bw.WriteBits(0, 1)
+
 	// Build Huffman trees from pixel data.
 	gBuilder := huffman.NewBuilder(256 + 24)
 	rBuilder := huffman.NewBuilder(256)
