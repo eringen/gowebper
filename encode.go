@@ -192,6 +192,10 @@ func (e *Encoder) encodeVP8L(pixels []uint32, width, height int, hasAlpha bool) 
 		// No color cache.
 		bw.WriteBits(0, 1)
 
+		// No meta-Huffman (use_meta = 0). The VP8L decoder reads this bit
+		// only at the top-level image (is_level0=1), not in sub-images.
+		bw.WriteBits(0, 1)
+
 		// Encode index stream with Huffman (no LZ77 for palette mode now).
 		encodePixelStream(bw, work, width, height, 0, nil)
 
@@ -227,6 +231,10 @@ func (e *Encoder) encodeVP8L(pixels []uint32, width, height int, hasAlpha bool) 
 		} else {
 			bw.WriteBits(0, 1)
 		}
+
+		// No meta-Huffman (use_meta = 0). The VP8L decoder reads this bit
+		// only at the top-level image (is_level0=1), not in sub-images.
+		bw.WriteBits(0, 1)
 
 		// Tokenise and encode pixel stream.
 		var tokens []lz77.Token
